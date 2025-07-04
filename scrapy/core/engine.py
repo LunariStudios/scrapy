@@ -11,7 +11,7 @@ import asyncio
 import logging
 from time import time
 from traceback import format_exc
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, Iterable
 
 from twisted.internet.defer import CancelledError, Deferred, inlineCallbacks, succeed
 from twisted.python.failure import Failure
@@ -450,7 +450,12 @@ class ExecutionEngine:
         await maybe_deferred_to_future(self.scraper.open_spider(spider))
         assert self.crawler.stats
         self.crawler.stats.open_spider(spider)
-        await self.signals.send_catch_log_async(signals.spider_opened, spider=spider)
+        expected_ex = (CloseSpider,)
+        res = await self.signals.send_catch_log_async(signals.spider_opened, spider=spider, dont_log=expected_ex)
+        detected_ex = self._detect_expected_exceptions(expected_ex, res)
+        ex = detected_ex.get(CloseSpider, CloseSpider(reason="finished"))
+        assert isinstance(ex, CloseSpider)  # typing
+        await self.close_spider(self.spider, reason=ex.reason)
 
     def _spider_idle(self) -> None:
         """
@@ -464,18 +469,26 @@ class ExecutionEngine:
         res = self.signals.send_catch_log(
             signals.spider_idle, spider=self.spider, dont_log=expected_ex
         )
-        detected_ex = {
-            ex: x.value
-            for _, x in res
-            for ex in expected_ex
-            if isinstance(x, Failure) and isinstance(x.value, ex)
-        }
+        detected_ex = self._detect_expected_exceptions(expected_ex, res)
         if DontCloseSpider in detected_ex:
             return
         if self.spider_is_idle():
             ex = detected_ex.get(CloseSpider, CloseSpider(reason="finished"))
             assert isinstance(ex, CloseSpider)  # typing
             self.close_spider(self.spider, reason=ex.reason)
+
+    def _detect_expected_exceptions(
+        self,
+        expected_ex: Iterable[type],
+        results: list[tuple[str, Any]],
+    ) -> dict[type[Exception], Exception]:
+        detected_ex = {
+            ex: x.value
+            for _, x in results
+            for ex in expected_ex
+            if isinstance(x, Failure) and isinstance(x.value, ex)
+        }
+        return detected_ex
 
     def close_spider(self, spider: Spider, reason: str = "cancelled") -> Deferred[None]:
         """Close (cancel) spider and clear all its outstanding requests"""

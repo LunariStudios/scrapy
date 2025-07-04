@@ -371,7 +371,7 @@ class CrawlerRunnerBase(ABC):
         crawler_or_spidercls: type[Spider] | str | Crawler,
         *args: Any,
         **kwargs: Any,
-    ) -> Awaitable[None]:
+    ) -> Awaitable[Crawler]:
         raise NotImplementedError
 
 
@@ -393,14 +393,14 @@ class CrawlerRunner(CrawlerRunnerBase):
 
     def __init__(self, settings: dict[str, Any] | Settings | None = None):
         super().__init__(settings)
-        self._active: set[Deferred[None]] = set()
+        self._active: set[Deferred[Any]] = set()
 
     def crawl(
         self,
         crawler_or_spidercls: type[Spider] | str | Crawler,
         *args: Any,
         **kwargs: Any,
-    ) -> Deferred[None]:
+    ) -> Deferred[Crawler]:
         """
         Run a crawler with the provided arguments.
 
@@ -411,7 +411,7 @@ class CrawlerRunner(CrawlerRunnerBase):
         instance, this method will try to create one using this parameter as
         the spider class given to it.
 
-        Returns a deferred that is fired when the crawling is finished.
+        Returns a deferred that is fired when the crawling is finished, containing the crawler that was run.
 
         :param crawler_or_spidercls: already created crawler, or a spider class
             or spider's name inside the project to create it
@@ -433,12 +433,13 @@ class CrawlerRunner(CrawlerRunnerBase):
     @inlineCallbacks
     def _crawl(
         self, crawler: Crawler, *args: Any, **kwargs: Any
-    ) -> Generator[Deferred[Any], Any, None]:
+    ) -> Generator[Deferred[Any], Any, Crawler]:
         self.crawlers.add(crawler)
         d = crawler.crawl(*args, **kwargs)
         self._active.add(d)
         try:
             yield d
+            return crawler
         finally:
             self.crawlers.discard(crawler)
             self._active.discard(d)
@@ -482,14 +483,14 @@ class AsyncCrawlerRunner(CrawlerRunnerBase):
 
     def __init__(self, settings: dict[str, Any] | Settings | None = None):
         super().__init__(settings)
-        self._active: set[asyncio.Task[None]] = set()
+        self._active: set[asyncio.Task[Any]] = set()
 
     def crawl(
         self,
         crawler_or_spidercls: type[Spider] | str | Crawler,
         *args: Any,
         **kwargs: Any,
-    ) -> asyncio.Task[None]:
+    ) -> asyncio.Task[Crawler]:
         """
         Run a crawler with the provided arguments.
 
@@ -501,7 +502,7 @@ class AsyncCrawlerRunner(CrawlerRunnerBase):
         the spider class given to it.
 
         Returns a :class:`~asyncio.Task` object which completes when the
-        crawling is finished.
+        crawling is finished, containing the crawler that was run.
 
         :param crawler_or_spidercls: already created crawler, or a spider class
             or spider's name inside the project to create it
@@ -524,15 +525,20 @@ class AsyncCrawlerRunner(CrawlerRunnerBase):
         crawler = self.create_crawler(crawler_or_spidercls)
         return self._crawl(crawler, *args, **kwargs)
 
-    def _crawl(self, crawler: Crawler, *args: Any, **kwargs: Any) -> asyncio.Task[None]:
+    def _crawl(self, crawler: Crawler, *args: Any, **kwargs: Any) -> asyncio.Task[Crawler]:
         # At this point the asyncio loop has been installed either by the user
         # or by AsyncCrawlerProcess (but it isn't running yet, so no asyncio.create_task()).
         loop = asyncio.get_event_loop()
         self.crawlers.add(crawler)
-        task = loop.create_task(crawler.crawl_async(*args, **kwargs))
+        
+        async def _run_crawler() -> Crawler:
+            await crawler.crawl_async(*args, **kwargs)
+            return crawler
+        
+        task = loop.create_task(_run_crawler())
         self._active.add(task)
 
-        def _done(_: asyncio.Task[None]) -> None:
+        def _done(_: asyncio.Task[Crawler]) -> None:
             self.crawlers.discard(crawler)
             self._active.discard(task)
             self.bootstrap_failed |= not getattr(crawler, "spider", None)
