@@ -455,7 +455,8 @@ class ExecutionEngine:
         detected_ex = self._detect_expected_exceptions(expected_ex, res)
         ex = detected_ex.get(CloseSpider, CloseSpider(reason="finished"))
         assert isinstance(ex, CloseSpider)  # typing
-        await self.close_spider(self.spider, reason=ex.reason)
+        if CloseSpider in detected_ex:
+            await self.close_spider(self.spider, reason=ex.reason)
 
     def _spider_idle(self) -> None:
         """
