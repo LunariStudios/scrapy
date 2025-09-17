@@ -122,6 +122,11 @@ class ExecutionEngine:
             self.close()
             raise
 
+    @property
+    def slot(self) -> _Slot | None:
+        """Returns the current slot."""
+        return self._slot
+
     def _get_scheduler_class(self, settings: BaseSettings) -> type[BaseScheduler]:
         from scrapy.core.scheduler import BaseScheduler
 
