@@ -196,7 +196,7 @@ class ExecutionEngine:
                 self._start_request_processing_awaitable = Deferred.fromCoroutine(coro)
         await maybe_deferred_to_future(self._closewait)
 
-    def stop(self) -> Deferred[None]:
+    def stop(self) -> Deferred[list[tuple[Any, Failure]]]:
         warnings.warn(
             "ExecutionEngine.stop() is deprecated, use stop_async() instead",
             ScrapyDeprecationWarning,
@@ -204,7 +204,7 @@ class ExecutionEngine:
         )
         return deferred_from_coro(self.stop_async())
 
-    async def stop_async(self) -> None:
+    async def stop_async(self) -> list[tuple[Any, Failure]]:
         """Gracefully stop the execution engine.
 
         .. versionadded:: VERSION
@@ -217,11 +217,13 @@ class ExecutionEngine:
         if self._start_request_processing_awaitable is not None:
             self._start_request_processing_awaitable.cancel()
             self._start_request_processing_awaitable = None
+        failures = list[tuple[Any, Failure]]()
         if self.spider is not None:
-            await self.close_spider_async(reason="shutdown")
+            failures.extend(await self.close_spider_async(reason="shutdown"))
         await self.signals.send_catch_log_async(signal=signals.engine_stopped)
         if self._closewait:
             self._closewait.callback(None)
+        return failures
 
     def close(self) -> Deferred[None]:
         warnings.warn(
@@ -567,7 +569,7 @@ class ExecutionEngine:
         }
         return detected_ex
 
-    def close_spider(self, spider: Spider, reason: str = "cancelled") -> Deferred[None]:
+    def close_spider(self, spider: Spider, reason: str = "cancelled") -> Deferred[list[tuple[Any, Failure]]]:
         warnings.warn(
             "ExecutionEngine.close_spider() is deprecated, use close_spider_async() instead",
             ScrapyDeprecationWarning,
@@ -575,7 +577,7 @@ class ExecutionEngine:
         )
         return deferred_from_coro(self.close_spider_async(reason=reason))
 
-    async def close_spider_async(self, *, reason: str = "cancelled") -> None:
+    async def close_spider_async(self, *, reason: str = "cancelled") -> list[tuple[Any, Failure]]:
         """Close (cancel) spider and clear all its outstanding requests.
 
         .. versionadded:: VERSION
@@ -588,7 +590,7 @@ class ExecutionEngine:
 
         if self._slot.closing is not None:
             await maybe_deferred_to_future(self._slot.closing)
-            return
+            return list()
 
         spider = self.spider
 
@@ -598,7 +600,7 @@ class ExecutionEngine:
 
         def log_failure(msg: str) -> None:
             logger.error(msg, exc_info=True, extra={"spider": spider})  # noqa: LOG014
-
+        failures = list[tuple[Any, Failure]]()
         try:
             await self._slot.close()
         except Exception:
@@ -622,11 +624,15 @@ class ExecutionEngine:
                 log_failure("Scheduler close failure")
 
         try:
-            await self.signals.send_catch_log_async(
+            results = await self.signals.send_catch_log_async(
                 signal=signals.spider_closed,
                 spider=spider,
                 reason=reason,
             )
+
+            for receiver, result in results:
+                if isinstance(result, Failure):
+                    failures.append((receiver, result))
         except Exception:
             log_failure("Error while sending spider_close signal")
 
@@ -649,3 +655,5 @@ class ExecutionEngine:
             await ensure_awaitable(self._spider_closed_callback(spider))
         except Exception:
             log_failure("Error running spider_closed_callback")
+
+        return failures

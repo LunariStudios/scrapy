@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from twisted.internet.defer import Deferred, DeferredList, inlineCallbacks
+from twisted.python.failure import Failure
 
 from scrapy import Spider, signals
 from scrapy.addons import AddonManager
@@ -211,7 +212,7 @@ class Crawler:
     def _create_engine(self) -> ExecutionEngine:
         return ExecutionEngine(self, lambda _: self.stop_async())
 
-    def stop(self) -> Deferred[None]:
+    def stop(self) -> Deferred[list[tuple[Any, Failure]] | None]:
         """Start a graceful stop of the crawler and return a deferred that is
         fired when the crawler is stopped."""
         warnings.warn(
@@ -221,7 +222,7 @@ class Crawler:
         )
         return deferred_from_coro(self.stop_async())
 
-    async def stop_async(self) -> None:
+    async def stop_async(self) -> list[tuple[Any, Failure]] | None:
         """Start a graceful stop of the crawler and complete when the crawler is stopped.
 
         .. versionadded:: VERSION
@@ -230,7 +231,7 @@ class Crawler:
             self.crawling = False
             assert self.engine
             if self.engine.running:
-                await self.engine.stop_async()
+                return await self.engine.stop_async()
 
     @staticmethod
     def _get_component(
