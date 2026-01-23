@@ -200,11 +200,16 @@ class Crawler:
             self.engine = self._create_engine()
             await self.engine.open_spider_async()
             await self.engine.start_async()
-        except Exception:
+        except Exception as ex:
             self.crawling = False
+            logger.error(
+                "Error caught when starting crawl",
+                exc_info=True,
+                extra={"spider": self.spider},
+            )
             if self.engine is not None:
                 await self.engine.close_async()
-            raise
+            raise ex
 
     def _create_spider(self, *args: Any, **kwargs: Any) -> Spider:
         return self.spidercls.from_crawler(self, *args, **kwargs)

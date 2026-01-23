@@ -527,14 +527,17 @@ class ExecutionEngine:
         await self.scraper.open_spider_async()
         assert self.crawler.stats
         self.crawler.stats.open_spider()
-        expected_ex = (CloseSpider,)
-        res = await self.signals.send_catch_log_async(signals.spider_opened, spider=self.crawler.spider
-        , dont_log=expected_ex)
-        detected_ex = self._detect_expected_exceptions(expected_ex, res)
+        expected_exceptions = (CloseSpider,)
+        res = await self.signals.send_catch_log_async(
+            signals.spider_opened,
+            spider=self.crawler.spider,
+            dont_log=expected_exceptions
+        )
+        detected_ex = self._detect_expected_exceptions(expected_exceptions, res)
         ex = detected_ex.get(CloseSpider, CloseSpider(reason="finished"))
         assert isinstance(ex, CloseSpider)  # typing
         if CloseSpider in detected_ex:
-            await self.close_spider(self.spider, reason=ex.reason)
+            await self.close_spider_async(reason=ex.reason)
 
     def _spider_idle(self) -> None:
         """
