@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import pprint
+import time
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
+from scrapy import signals
 from scrapy.exceptions import NotConfigured, ScrapyDeprecationWarning
 from scrapy.utils.defer import ensure_awaitable
 from scrapy.utils.deprecate import argument_is_required
@@ -143,16 +145,45 @@ class MiddlewareManager(ABC):
         methods = cast(
             "Iterable[Callable[Concatenate[_T, _P], _T]]", self.methods[methodname]
         )
-        for method in methods:
-            warn = global_object_name(method) if warn_deferred else None
-            if always_add_spider or (
-                add_spider and method in self._mw_methods_requiring_spider
-            ):
-                obj = await ensure_awaitable(
-                    method(obj, *(*args, self._spider)), _warn=warn
+        
+        # Track chain-level stats for observability
+        chain_start_time = time.perf_counter()
+        middlewares_executed: list[str] = []
+        chain_error: BaseException | None = None
+        
+        try:
+            for method in methods:
+                middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
+                middlewares_executed.append(middleware_name)
+                
+                warn = global_object_name(method) if warn_deferred else None
+                if always_add_spider or (
+                    add_spider and method in self._mw_methods_requiring_spider
+                ):
+                    obj = await ensure_awaitable(
+                        method(obj, *(*args, self._spider)), _warn=warn
+                    )
+                else:
+                    obj = await ensure_awaitable(method(obj, *args), _warn=warn)
+        except BaseException as exc:
+            chain_error = exc
+            raise
+        finally:
+            # Emit chain complete signal with aggregate stats
+            chain_duration = time.perf_counter() - chain_start_time
+            if self.crawler:
+                self.crawler.signals.send_catch_log(
+                    signal=signals.middleware_chain_complete,
+                    manager=self,
+                    method_name=methodname,
+                    obj=obj,
+                    args=args,
+                    middlewares_executed=middlewares_executed,
+                    middleware_count=len(middlewares_executed),
+                    start_time=chain_start_time,
+                    duration=chain_duration,
+                    error=chain_error,
                 )
-            else:
-                obj = await ensure_awaitable(method(obj, *args), _warn=warn)
         return obj
 
     def open_spider(self, spider: Spider) -> Deferred[list[None]]:  # pragma: no cover

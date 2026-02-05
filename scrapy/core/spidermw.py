@@ -7,6 +7,7 @@ See documentation in docs/topics/spider-middleware.rst
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
 from functools import wraps
 from inspect import isasyncgenfunction, iscoroutine
@@ -17,7 +18,7 @@ from warnings import warn
 from twisted.internet.defer import Deferred, inlineCallbacks
 from twisted.python.failure import Failure
 
-from scrapy import Request, Spider
+from scrapy import Request, Spider, signals
 from scrapy.exceptions import ScrapyDeprecationWarning, _InvalidOutput
 from scrapy.http import Response
 from scrapy.middleware import MiddlewareManager
@@ -148,24 +149,50 @@ class SpiderMiddlewareManager(MiddlewareManager):
         response: Response,
         request: Request,
     ) -> Iterable[_T] | AsyncIterator[_T]:
-        for method in self.methods["process_spider_input"]:
-            method = cast("Callable", method)
-            try:
-                if method in self._mw_methods_requiring_spider:
-                    result = method(response=response, spider=self._spider)
-                else:
-                    result = method(response=response)
-                if result is not None:
-                    msg = (
-                        f"{global_object_name(method)} must return None "
-                        f"or raise an exception, got {type(result)}"
-                    )
-                    raise _InvalidOutput(msg)
-            except _InvalidOutput:
-                raise
-            except Exception:
-                return await scrape_func(Failure(), request)
-        return await scrape_func(response, request)
+        chain_start_time = time.perf_counter()
+        middlewares_executed: list[str] = []
+        chain_error: BaseException | None = None
+        
+        try:
+            for method in self.methods["process_spider_input"]:
+                method = cast("Callable", method)
+                middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
+                middlewares_executed.append(middleware_name)
+                
+                try:
+                    if method in self._mw_methods_requiring_spider:
+                        result = method(response=response, spider=self._spider)
+                    else:
+                        result = method(response=response)
+                    if result is not None:
+                        msg = (
+                            f"{global_object_name(method)} must return None "
+                            f"or raise an exception, got {type(result)}"
+                        )
+                        raise _InvalidOutput(msg)
+                except _InvalidOutput:
+                    raise
+                except Exception:
+                    return await scrape_func(Failure(), request)
+            return await scrape_func(response, request)
+        except BaseException as exc:
+            chain_error = exc
+            raise
+        finally:
+            chain_duration = time.perf_counter() - chain_start_time
+            if self.crawler:
+                self.crawler.signals.send_catch_log(
+                    signal=signals.middleware_chain_complete,
+                    manager=self,
+                    method_name="process_spider_input",
+                    obj=response,
+                    args=(),
+                    middlewares_executed=middlewares_executed,
+                    middleware_count=len(middlewares_executed),
+                    start_time=chain_start_time,
+                    duration=chain_duration,
+                    error=chain_error,
+                )
 
     def _evaluate_iterable(
         self,

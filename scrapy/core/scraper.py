@@ -53,6 +53,24 @@ logger = logging.getLogger(__name__)
 
 
 _T = TypeVar("_T")
+
+
+class _ItemStats:
+    """Track item processing statistics for a single request."""
+    __slots__ = ('scraped', 'dropped', 'errored')
+    
+    def __init__(self) -> None:
+        self.scraped: int = 0
+        self.dropped: int = 0
+        self.errored: int = 0
+    
+    @property
+    def total(self) -> int:
+        return self.scraped + self.dropped + self.errored
+
+
+# Key used to store item stats in request.meta
+_ITEM_STATS_KEY = "_scrapy_item_stats"
 QueueTuple: TypeAlias = tuple[Response | Failure, Request, Deferred[None]]
 
 
@@ -231,6 +249,13 @@ class Scraper:
                 extra={"spider": self.crawler.spider},
             )
         finally:
+            # Signal that ALL processing for this request is complete
+            self.signals.send_catch_log(
+                signal=signals.request_scraping_complete,
+                request=request,
+                response=result if isinstance(result, Response) else None,
+                spider=self.crawler.spider,
+            )
             self.slot.finish_response(result, request)
             self._check_if_closing()
             self._scrape_next()
@@ -409,36 +434,73 @@ class Scraper:
 
         .. versionadded:: 2.13
         """
+        import time
+        from scrapy.utils.python import global_object_name
+        
+        # Initialize item stats for this request
+        item_stats = _ItemStats()
+        request.meta[_ITEM_STATS_KEY] = item_stats
+        
+        # Track pipeline processing time for observability
+        pipeline_start_time = time.perf_counter()
+        pipeline_error: BaseException | None = None
+        
         it: Iterable[_T] | AsyncIterator[_T]
-        if is_asyncio_available():
-            if isinstance(result, AsyncIterator):
+        try:
+            if is_asyncio_available():
+                if isinstance(result, AsyncIterator):
+                    it = aiter_errback(result, self.handle_spider_error, request, response)
+                else:
+                    it = iter_errback(result, self.handle_spider_error, request, response)
+                await _parallel_asyncio(
+                    it, self.concurrent_items, self._process_spidermw_output_async, response
+                )
+            elif isinstance(result, AsyncIterator):
                 it = aiter_errback(result, self.handle_spider_error, request, response)
+                await maybe_deferred_to_future(
+                    parallel_async(
+                        it,
+                        self.concurrent_items,
+                        self._process_spidermw_output,
+                        response,
+                    )
+                )
             else:
                 it = iter_errback(result, self.handle_spider_error, request, response)
-            await _parallel_asyncio(
-                it, self.concurrent_items, self._process_spidermw_output_async, response
-            )
-            return
-        if isinstance(result, AsyncIterator):
-            it = aiter_errback(result, self.handle_spider_error, request, response)
-            await maybe_deferred_to_future(
-                parallel_async(
-                    it,
-                    self.concurrent_items,
-                    self._process_spidermw_output,
-                    response,
+                await maybe_deferred_to_future(
+                    parallel(
+                        it,
+                        self.concurrent_items,
+                        self._process_spidermw_output,
+                        response,
+                    )
                 )
+        except Exception as e:
+            pipeline_error = e
+            raise
+        finally:
+            pipeline_duration = time.perf_counter() - pipeline_start_time
+            # Get pipeline names from the middleware instances
+            pipeline_names = [global_object_name(type(mw)) for mw in self.itemproc.middlewares]
+            
+            # Emit item_processing_complete signal with stats and pipeline info
+            # This fires after all items have been processed through pipelines
+            await self.signals.send_catch_log_async(
+                signal=signals.item_processing_complete,
+                request=request,
+                response=response,
+                spider=self.crawler.spider,
+                item_count=item_stats.total,
+                items_scraped=item_stats.scraped,
+                items_dropped=item_stats.dropped,
+                items_errored=item_stats.errored,
+                start_time=pipeline_start_time,
+                duration=pipeline_duration,
+                error=pipeline_error,
+                pipelines=pipeline_names,
             )
-            return
-        it = iter_errback(result, self.handle_spider_error, request, response)
-        await maybe_deferred_to_future(
-            parallel(
-                it,
-                self.concurrent_items,
-                self._process_spidermw_output,
-                response,
-            )
-        )
+            # Clean up
+            request.meta.pop(_ITEM_STATS_KEY, None)
 
     def _process_spidermw_output(
         self, output: Any, response: Response | Failure
@@ -493,6 +555,12 @@ class Scraper:
         assert self.slot is not None  # typing
         assert self.crawler.spider is not None  # typing
         self.slot.itemproc_size += 1
+        
+        # Get item stats from source request (if available)
+        item_stats: _ItemStats | None = None
+        if isinstance(response, Response) and response.request:
+            item_stats = response.request.meta.get(_ITEM_STATS_KEY)
+        
         try:
             if self._itemproc_has_async["process_item"]:
                 output = await self.itemproc.process_item_async(item)
@@ -501,6 +569,8 @@ class Scraper:
                     self.itemproc.process_item(item, self.crawler.spider)
                 )
         except DropItem as ex:
+            if item_stats:
+                item_stats.dropped += 1
             logkws = self.logformatter.dropped(item, ex, response, self.crawler.spider)
             if logkws is not None:
                 logger.log(
@@ -514,6 +584,8 @@ class Scraper:
                 exception=ex,
             )
         except Exception as ex:
+            if item_stats:
+                item_stats.errored += 1
             logkws = self.logformatter.item_error(
                 item, ex, response, self.crawler.spider
             )
@@ -530,6 +602,8 @@ class Scraper:
                 failure=Failure(),
             )
         else:
+            if item_stats:
+                item_stats.scraped += 1
             logkws = self.logformatter.scraped(output, response, self.crawler.spider)
             if logkws is not None:
                 logger.log(
