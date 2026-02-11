@@ -309,11 +309,18 @@ class ExecutionEngine:
 
             while self._start and self.spider and self.running:
                 await self._process_start_next()
-                if not self.needs_backout():
+                needs_backout, reason = self.needs_backout()
+                if not needs_backout:
                     # Give room for the outcome of self._process_start_next() to be
                     # processed before continuing with the next iteration.
                     self._slot.nextcall.schedule()
                     await self._slot.nextcall.wait()
+                elif reason:
+                    self.signals.send_catch_log(
+                        signal=signals.engine_backout,
+                        spider=self.spider,
+                        reason=reason,
+                    )
         except (asyncio.exceptions.CancelledError, CancelledError):
             # self.stop_async() has cancelled us, nothing to do
             return
@@ -331,27 +338,74 @@ class ExecutionEngine:
         if self._slot is None or self._slot.closing is not None or self.paused:
             return
 
-        while not self.needs_backout():
+        # --- Performance telemetry: per-subsystem state snapshots ---
+        assert self.scraper.slot is not None  # typing
+        self.signals.send_catch_log(
+            signal=signals.downloader_state,
+            spider=self.spider,
+            active=len(self.downloader.active),
+            queued=sum(len(s.queue) for s in self.downloader.slots.values()),
+            transferring=sum(len(s.transferring) for s in self.downloader.slots.values()),
+            total_concurrency=self.downloader.total_concurrency,
+            slot_count=len(self.downloader.slots),
+        )
+        self.signals.send_catch_log(
+            signal=signals.scraper_state,
+            spider=self.spider,
+            queue=len(self.scraper.slot.queue),
+            active_count=len(self.scraper.slot.active),
+            active_size=self.scraper.slot.active_size,
+            max_active_size=self.scraper.slot.max_active_size,
+            itemproc_size=self.scraper.slot.itemproc_size,
+            concurrent_items=self.scraper.concurrent_items,
+        )
+        self.signals.send_catch_log(
+            signal=signals.scheduler_state,
+            spider=self.spider,
+            has_pending=self._slot.scheduler.has_pending_requests(),
+            slot_inprogress=len(self._slot.inprogress),
+        )
+        while True:
+            needs_backout, reason = self.needs_backout()
+            if needs_backout:
+                if reason:
+                    self.signals.send_catch_log(
+                        signal=signals.engine_backout,
+                        spider=self.spider,
+                        reason=reason,
+                    )
+                break
             if not self._start_scheduled_request():
                 break
 
         if self.spider_is_idle() and self._slot.close_if_idle:
             self._spider_idle()
 
-    def needs_backout(self) -> bool:
-        """Returns ``True`` if no more requests can be sent at the moment, or
-        ``False`` otherwise.
+    def needs_backout(self) -> tuple[bool, str | None]:
+        """Returns a tuple of (bool, str | None).
+        The first element checks if no more requests can be sent at the moment.
+        The second element provides the reason for backout if applicable.
 
         See :ref:`start-requests-lazy` for an example.
         """
         assert self.scraper.slot is not None  # typing
-        return (
-            not self.running
-            or not self._slot
-            or bool(self._slot.closing)
-            or self.downloader.needs_backout()
-            or self.scraper.slot.needs_backout()
-        )
+        
+        if not self.running:
+            return True, "shutdown"
+            
+        if not self._slot:
+            return True, "no_slot"
+            
+        if bool(self._slot.closing):
+            return True, "slot_closing"
+            
+        if self.downloader.needs_backout():
+            return True, "downloader_requested_backout"
+            
+        if self.scraper.slot.needs_backout():
+            return True, "scraper_requested_backout"
+            
+        return False, None
 
     def _start_scheduled_request(self) -> bool:
         assert self._slot is not None  # typing

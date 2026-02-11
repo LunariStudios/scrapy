@@ -7,6 +7,7 @@ signals here without documenting them there.
 
 engine_started = object()
 engine_stopped = object()
+engine_backout = object()
 scheduler_empty = object()
 spider_opened = object()
 spider_idle = object()
@@ -32,3 +33,8 @@ item_processing_complete = object()   # After all items processed with statistic
 
 # Middleware chain processing signals (for observability)
 middleware_chain_complete = object()  # After all middlewares in a chain have been processed
+
+# Engine performance telemetry signals (per-subsystem snapshots)
+downloader_state = object()   # Downloader active/queued/transferring/concurrency snapshot
+scraper_state = object()      # Scraper queue/active/itemproc/limits snapshot
+scheduler_state = object()    # Scheduler pending + slot inprogress snapshot
