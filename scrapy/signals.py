@@ -34,6 +34,11 @@ item_processing_complete = object()   # After all items processed with statistic
 # Middleware chain processing signals (for observability)
 middleware_chain_complete = object()  # After all middlewares in a chain have been processed
 
+# Rate limiting signals (429 Too Many Requests)
+spider_rate_limited = object()          # 429 received, engine pausing
+spider_rate_limited_resumed = object()  # Engine resumed after rate-limit pause
+spider_rate_limited_shutdown = object() # Retry-After exceeds max wait, shutting down
+
 # Engine performance telemetry signals (per-subsystem snapshots)
 downloader_state = object()   # Downloader active/queued/transferring/concurrency snapshot
 scraper_state = object()      # Scraper queue/active/itemproc/limits snapshot
