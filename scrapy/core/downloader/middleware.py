@@ -86,22 +86,39 @@ class DownloaderMiddlewareManager(MiddlewareManager):
                     middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
                     middlewares_executed.append(middleware_name)
                     
-                    if method in self._mw_methods_requiring_spider:
-                        response = await ensure_awaitable(
-                            method(request=request, spider=self._spider),
-                            _warn=global_object_name(method),
-                        )
-                    else:
-                        response = await ensure_awaitable(
-                            method(request=request), _warn=global_object_name(method)
-                        )
-                    if response is not None and not isinstance(
-                        response, (Response, Request)
-                    ):
-                        raise _InvalidOutput(
-                            f"Middleware {method.__qualname__} must return None, Response or "
-                            f"Request, got {response.__class__.__name__}"
-                        )
+                    method_start = time.perf_counter()
+                    method_error: BaseException | None = None
+                    try:
+                        if method in self._mw_methods_requiring_spider:
+                            response = await ensure_awaitable(
+                                method(request=request, spider=self._spider),
+                                _warn=global_object_name(method),
+                            )
+                        else:
+                            response = await ensure_awaitable(
+                                method(request=request), _warn=global_object_name(method)
+                            )
+                        if response is not None and not isinstance(
+                            response, (Response, Request)
+                        ):
+                            raise _InvalidOutput(
+                                f"Middleware {method.__qualname__} must return None, Response or "
+                                f"Request, got {response.__class__.__name__}"
+                            )
+                    except BaseException as exc:
+                        method_error = exc
+                        raise
+                    finally:
+                        method_duration = time.perf_counter() - method_start
+                        if self.crawler:
+                            self.crawler.signals.send_catch_log(
+                                signal=signals.middleware_method_complete,
+                                manager_type=self.component_name,
+                                method_name="process_request",
+                                middleware_name=middleware_name,
+                                duration=method_duration,
+                                error=method_error,
+                            )
                     if response:
                         return response
                 return await download_func(request)
@@ -140,21 +157,38 @@ class DownloaderMiddlewareManager(MiddlewareManager):
                     middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
                     middlewares_executed.append(middleware_name)
                     
-                    if method in self._mw_methods_requiring_spider:
-                        response = await ensure_awaitable(
-                            method(request=request, response=response, spider=self._spider),
-                            _warn=global_object_name(method),
-                        )
-                    else:
-                        response = await ensure_awaitable(
-                            method(request=request, response=response),
-                            _warn=global_object_name(method),
-                        )
-                    if not isinstance(response, (Response, Request)):
-                        raise _InvalidOutput(
-                            f"Middleware {method.__qualname__} must return Response or Request, "
-                            f"got {type(response)}"
-                        )
+                    method_start = time.perf_counter()
+                    method_error: BaseException | None = None
+                    try:
+                        if method in self._mw_methods_requiring_spider:
+                            response = await ensure_awaitable(
+                                method(request=request, response=response, spider=self._spider),
+                                _warn=global_object_name(method),
+                            )
+                        else:
+                            response = await ensure_awaitable(
+                                method(request=request, response=response),
+                                _warn=global_object_name(method),
+                            )
+                        if not isinstance(response, (Response, Request)):
+                            raise _InvalidOutput(
+                                f"Middleware {method.__qualname__} must return Response or Request, "
+                                f"got {type(response)}"
+                            )
+                    except BaseException as exc:
+                        method_error = exc
+                        raise
+                    finally:
+                        method_duration = time.perf_counter() - method_start
+                        if self.crawler:
+                            self.crawler.signals.send_catch_log(
+                                signal=signals.middleware_method_complete,
+                                manager_type=self.component_name,
+                                method_name="process_response",
+                                middleware_name=middleware_name,
+                                duration=method_duration,
+                                error=method_error,
+                            )
                     if isinstance(response, Request):
                         return response
                 return response
@@ -188,25 +222,42 @@ class DownloaderMiddlewareManager(MiddlewareManager):
                     middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
                     middlewares_executed.append(middleware_name)
                     
-                    if method in self._mw_methods_requiring_spider:
-                        response = await ensure_awaitable(
-                            method(
-                                request=request, exception=exception, spider=self._spider
-                            ),
-                            _warn=global_object_name(method),
-                        )
-                    else:
-                        response = await ensure_awaitable(
-                            method(request=request, exception=exception),
-                            _warn=global_object_name(method),
-                        )
-                    if response is not None and not isinstance(
-                        response, (Response, Request)
-                    ):
-                        raise _InvalidOutput(
-                            f"Middleware {method.__qualname__} must return None, Response or "
-                            f"Request, got {type(response)}"
-                        )
+                    method_start = time.perf_counter()
+                    method_error: BaseException | None = None
+                    try:
+                        if method in self._mw_methods_requiring_spider:
+                            response = await ensure_awaitable(
+                                method(
+                                    request=request, exception=exception, spider=self._spider
+                                ),
+                                _warn=global_object_name(method),
+                            )
+                        else:
+                            response = await ensure_awaitable(
+                                method(request=request, exception=exception),
+                                _warn=global_object_name(method),
+                            )
+                        if response is not None and not isinstance(
+                            response, (Response, Request)
+                        ):
+                            raise _InvalidOutput(
+                                f"Middleware {method.__qualname__} must return None, Response or "
+                                f"Request, got {type(response)}"
+                            )
+                    except BaseException as exc:
+                        method_error = exc
+                        raise
+                    finally:
+                        method_duration = time.perf_counter() - method_start
+                        if self.crawler:
+                            self.crawler.signals.send_catch_log(
+                                signal=signals.middleware_method_complete,
+                                manager_type=self.component_name,
+                                method_name="process_exception",
+                                middleware_name=middleware_name,
+                                duration=method_duration,
+                                error=method_error,
+                            )
                     if response:
                         return response
                 raise exception

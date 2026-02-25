@@ -157,14 +157,31 @@ class MiddlewareManager(ABC):
                 middlewares_executed.append(middleware_name)
                 
                 warn = global_object_name(method) if warn_deferred else None
-                if always_add_spider or (
-                    add_spider and method in self._mw_methods_requiring_spider
-                ):
-                    obj = await ensure_awaitable(
-                        method(obj, *(*args, self._spider)), _warn=warn
-                    )
-                else:
-                    obj = await ensure_awaitable(method(obj, *args), _warn=warn)
+                method_start = time.perf_counter()
+                method_error: BaseException | None = None
+                try:
+                    if always_add_spider or (
+                        add_spider and method in self._mw_methods_requiring_spider
+                    ):
+                        obj = await ensure_awaitable(
+                            method(obj, *(*args, self._spider)), _warn=warn
+                        )
+                    else:
+                        obj = await ensure_awaitable(method(obj, *args), _warn=warn)
+                except BaseException as exc:
+                    method_error = exc
+                    raise
+                finally:
+                    method_duration = time.perf_counter() - method_start
+                    if self.crawler:
+                        self.crawler.signals.send_catch_log(
+                            signal=signals.middleware_method_complete,
+                            manager_type=self.component_name,
+                            method_name=methodname,
+                            middleware_name=middleware_name,
+                            duration=method_duration,
+                            error=method_error,
+                        )
         except BaseException as exc:
             chain_error = exc
             raise

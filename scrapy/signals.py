@@ -33,6 +33,7 @@ item_processing_complete = object()   # After all items processed with statistic
 
 # Middleware chain processing signals (for observability)
 middleware_chain_complete = object()  # After all middlewares in a chain have been processed
+middleware_method_complete = object()  # After each individual middleware method completes
 
 # Rate limiting signals (429 Too Many Requests)
 spider_rate_limited = object()          # 429 received, engine pausing

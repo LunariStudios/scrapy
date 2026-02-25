@@ -159,6 +159,8 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
                 middlewares_executed.append(middleware_name)
                 
+                method_start = time.perf_counter()
+                method_error: BaseException | None = None
                 try:
                     if method in self._mw_methods_requiring_spider:
                         result = method(response=response, spider=self._spider)
@@ -171,9 +173,22 @@ class SpiderMiddlewareManager(MiddlewareManager):
                         )
                         raise _InvalidOutput(msg)
                 except _InvalidOutput:
+                    method_error = None  # _InvalidOutput is a programming error, not a middleware error
                     raise
-                except Exception:
+                except Exception as exc:
+                    method_error = exc
                     return await scrape_func(Failure(), request)
+                finally:
+                    method_duration = time.perf_counter() - method_start
+                    if self.crawler:
+                        self.crawler.signals.send_catch_log(
+                            signal=signals.middleware_method_complete,
+                            manager_type=self.component_name,
+                            method_name="process_spider_input",
+                            middleware_name=middleware_name,
+                            duration=method_duration,
+                            error=method_error,
+                        )
             return await scrape_func(response, request)
         except BaseException as exc:
             chain_error = exc
@@ -252,12 +267,30 @@ class SpiderMiddlewareManager(MiddlewareManager):
             if method is None:
                 continue
             method = cast("Callable", method)
-            if method in self._mw_methods_requiring_spider:
-                result = method(
-                    response=response, exception=exception, spider=self._spider
-                )
-            else:
-                result = method(response=response, exception=exception)
+            middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
+            method_start = time.perf_counter()
+            method_error: BaseException | None = None
+            try:
+                if method in self._mw_methods_requiring_spider:
+                    result = method(
+                        response=response, exception=exception, spider=self._spider
+                    )
+                else:
+                    result = method(response=response, exception=exception)
+            except BaseException as exc:
+                method_error = exc
+                raise
+            finally:
+                method_duration = time.perf_counter() - method_start
+                if self.crawler:
+                    self.crawler.signals.send_catch_log(
+                        signal=signals.middleware_method_complete,
+                        manager_type=self.component_name,
+                        method_name="process_spider_exception",
+                        middleware_name=middleware_name,
+                        duration=method_duration,
+                        error=method_error,
+                    )
             if _isiterable(result):
                 # stop exception handling by handing control over to the
                 # process_spider_output chain if an iterable has been returned
@@ -320,6 +353,9 @@ class SpiderMiddlewareManager(MiddlewareManager):
                     need_upgrade = True
                 elif last_result_is_async and not isasyncgenfunction(method):
                     need_downgrade = True
+            method_start = time.perf_counter()
+            method_error: BaseException | None = None
+            middleware_name = method.__qualname__.split('.')[0] if hasattr(method, '__qualname__') else 'Unknown'
             try:
                 if need_upgrade:
                     # Iterable -> AsyncIterator
@@ -348,12 +384,24 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 else:
                     result = method(response=response, result=result)
             except Exception as ex:
+                method_error = ex
                 exception_result: Failure | MutableChain[_T] | MutableAsyncChain[_T] = (
                     self._process_spider_exception(response, ex, method_index + 1)
                 )
                 if isinstance(exception_result, Failure):
                     raise
                 return exception_result
+            finally:
+                method_duration = time.perf_counter() - method_start
+                if self.crawler:
+                    self.crawler.signals.send_catch_log(
+                        signal=signals.middleware_method_complete,
+                        manager_type=self.component_name,
+                        method_name="process_spider_output",
+                        middleware_name=middleware_name,
+                        duration=method_duration,
+                        error=method_error,
+                    )
             if _isiterable(result):
                 result = self._evaluate_iterable(
                     response, result, method_index + 1, recovered
