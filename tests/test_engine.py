@@ -714,6 +714,68 @@ class TestEngineCloseSpider:
         assert "Scheduler close failure" in caplog.text
 
     @coroutine_test
+    async def test_refundable_scheduler(self, crawler: Crawler) -> None:
+        class TestScheduler(BaseScheduler):
+            def __init__(self):
+                self.calls = []
+
+            def has_pending_requests(self) -> bool:
+                return False
+
+            def enqueue_request(self, request: Request) -> bool:
+                return True
+
+            def next_request(self) -> Request | None:
+                return None
+
+            def refund_pending_requests(self, reason: str) -> None:
+                self.calls.append(("refund", reason))
+
+            def close(self, reason: str) -> None:
+                self.calls.append(("close", reason))
+
+        engine = ExecutionEngine(crawler, lambda _: None)
+        crawler.engine = engine
+        await engine.open_spider_async()
+        assert engine._slot
+        scheduler = TestScheduler()
+        engine._slot.scheduler = scheduler
+
+        await engine.close_spider_async(reason="shutdown")
+
+        assert scheduler.calls == [("refund", "shutdown"), ("close", "shutdown")]
+
+    @coroutine_test
+    async def test_exception_scheduler_refund(
+        self, crawler: Crawler, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class TestScheduler(BaseScheduler):
+            def has_pending_requests(self) -> bool:
+                return False
+
+            def enqueue_request(self, request: Request) -> bool:
+                return True
+
+            def next_request(self) -> Request | None:
+                return None
+
+            def refund_pending_requests(self, reason: str) -> None:
+                raise ValueError("refund failed")
+
+            def close(self, reason: str) -> None:
+                return None
+
+        engine = ExecutionEngine(crawler, lambda _: None)
+        crawler.engine = engine
+        await engine.open_spider_async()
+        assert engine._slot
+        engine._slot.scheduler = TestScheduler()
+
+        await engine.close_spider_async()
+
+        assert "Scheduler refund failure" in caplog.text
+
+    @coroutine_test
     async def test_exception_signal(
         self, crawler: Crawler, caplog: pytest.LogCaptureFixture
     ) -> None:

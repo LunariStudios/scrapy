@@ -18,7 +18,7 @@ from twisted.internet.defer import CancelledError, Deferred, inlineCallbacks
 from twisted.python.failure import Failure
 
 from scrapy import signals
-from scrapy.core.scheduler import BaseScheduler
+from scrapy.core.scheduler import BaseScheduler, RefundableScheduler
 from scrapy.core.scraper import Scraper
 from scrapy.exceptions import (
     CloseSpider,
@@ -697,9 +697,65 @@ class ExecutionEngine:
         except Exception:
             log_failure("Scraper close failure")
 
-        if hasattr(self._slot.scheduler, "close"):
+        scheduler = self._slot.scheduler
+        scheduler_name = global_object_name(type(scheduler))
+        scheduler_has_pending: bool | str = "unknown"
+        scheduler_queue_length: int | str = "unknown"
+        try:
+            scheduler_has_pending = scheduler.has_pending_requests()
+        except Exception as exc:
+            logger.info(
+                "Scheduler refund inspection: has_pending_requests() failed for %(scheduler)s: %(error)s",
+                {"scheduler": scheduler_name, "error": exc},
+                extra={"spider": spider},
+            )
+        if hasattr(scheduler, "get_queue_length") and callable(scheduler.get_queue_length):
             try:
-                if (d := self._slot.scheduler.close(reason)) is not None:
+                scheduler_queue_length = scheduler.get_queue_length()
+            except Exception as exc:
+                logger.info(
+                    "Scheduler refund inspection: get_queue_length() failed for %(scheduler)s: %(error)s",
+                    {"scheduler": scheduler_name, "error": exc},
+                    extra={"spider": spider},
+                )
+        logger.info(
+            "Scheduler refund inspection: scheduler=%(scheduler)s refundable=%(refundable)s has_pending=%(has_pending)s queue_length=%(queue_length)s reason=%(reason)s",
+            {
+                "scheduler": scheduler_name,
+                "refundable": isinstance(scheduler, RefundableScheduler),
+                "has_pending": scheduler_has_pending,
+                "queue_length": scheduler_queue_length,
+                "reason": reason,
+            },
+            extra={"spider": spider},
+        )
+
+        if isinstance(scheduler, RefundableScheduler):
+            try:
+                logger.info(
+                    "Scheduler refund starting for %(scheduler)s",
+                    {"scheduler": scheduler_name},
+                    extra={"spider": spider},
+                )
+                if (d := scheduler.refund_pending_requests(reason)) is not None:
+                    await maybe_deferred_to_future(d)
+                logger.info(
+                    "Scheduler refund finished for %(scheduler)s",
+                    {"scheduler": scheduler_name},
+                    extra={"spider": spider},
+                )
+            except Exception:
+                log_failure("Scheduler refund failure")
+        else:
+            logger.info(
+                "Scheduler refund skipped: %(scheduler)s does not implement RefundableScheduler",
+                {"scheduler": scheduler_name},
+                extra={"spider": spider},
+            )
+
+        if hasattr(scheduler, "close"):
+            try:
+                if (d := scheduler.close(reason)) is not None:
                     await maybe_deferred_to_future(d)
             except Exception:
                 log_failure("Scheduler close failure")

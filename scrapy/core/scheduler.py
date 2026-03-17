@@ -4,7 +4,7 @@ import json
 import logging
 from abc import abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from warnings import warn
 
 # working around https://github.com/sphinx-doc/sphinx/issues/10400
@@ -31,6 +31,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class RefundableScheduler(Protocol):
+    """Protocol for schedulers that can return pending requests on shutdown."""
+
+    def refund_pending_requests(self, reason: str) -> Deferred[None] | None:
+        """Return pending requests to their original source before closing."""
 
 
 class BaseSchedulerMeta(type):
