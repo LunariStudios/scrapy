@@ -37,8 +37,16 @@ logger = logging.getLogger(__name__)
 class RefundableScheduler(Protocol):
     """Protocol for schedulers that can return pending requests on shutdown."""
 
-    def refund_pending_requests(self, reason: str) -> Deferred[None] | None:
-        """Return pending requests to their original source before closing."""
+    def refund_pending_requests(
+        self, reason: str, inflight_requests: list[Request] | None = None,
+    ) -> Deferred[None] | None:
+        """Return pending requests to their original source before closing.
+
+        *inflight_requests*, when provided, is a list of ``Request`` objects
+        that were already pulled from the scheduler and in-flight in the
+        downloader at the time of shutdown.  They should be included in the
+        refund alongside any still-pending requests.
+        """
 
 
 class BaseSchedulerMeta(type):

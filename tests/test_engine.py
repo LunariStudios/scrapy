@@ -745,6 +745,58 @@ class TestEngineCloseSpider:
 
         assert scheduler.calls == [("refund", "shutdown"), ("close", "shutdown")]
 
+    @pytest.mark.only_asyncio
+    @coroutine_test
+    async def test_stop_async_refunds_before_close_wait(
+        self, crawler: Crawler
+    ) -> None:
+        class TestScheduler(BaseScheduler):
+            def __init__(self):
+                self.calls = []
+
+            def has_pending_requests(self) -> bool:
+                return True
+
+            def enqueue_request(self, request: Request) -> bool:
+                return True
+
+            def next_request(self) -> Request | None:
+                return None
+
+            def refund_pending_requests(self, reason: str) -> None:
+                self.calls.append(("refund", reason))
+
+            def close(self, reason: str) -> None:
+                self.calls.append(("close", reason))
+
+        engine = ExecutionEngine(crawler, lambda _: None)
+        crawler.engine = engine
+        await engine.open_spider_async()
+        assert engine._slot
+        scheduler = TestScheduler()
+        engine._slot.scheduler = scheduler
+
+        start_task = asyncio.create_task(
+            engine.start_async(_start_request_processing=False)
+        )
+        await asyncio.sleep(0)
+
+        blocker = Request("https://example.org/block")
+        engine._slot.add_request(blocker)
+
+        stop_task = asyncio.create_task(engine.stop_async())
+        await asyncio.sleep(0)
+
+        assert scheduler.calls == [("refund", "shutdown")]
+        assert not stop_task.done()
+
+        engine._slot.remove_request(blocker)
+
+        await stop_task
+        await start_task
+
+        assert scheduler.calls == [("refund", "shutdown"), ("close", "shutdown")]
+
     @coroutine_test
     async def test_exception_scheduler_refund(
         self, crawler: Crawler, caplog: pytest.LogCaptureFixture

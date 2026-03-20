@@ -127,6 +127,7 @@ class ExecutionEngine:
         self._start_request_processing_awaitable: (
             asyncio.Future[None] | Deferred[None] | None
         ) = None
+        self._scheduler_refund_reason: str | None = None
         downloader_cls: type[Downloader] = load_object(self.settings["DOWNLOADER"])
         try:
             self.scheduler_cls: type[BaseScheduler] = self._get_scheduler_class(
@@ -233,12 +234,102 @@ class ExecutionEngine:
                 self._start_request_processing_awaitable.cancel()
             self._start_request_processing_awaitable = None
         failures = list[tuple[Any, Failure]]()
+        await self._refund_scheduler_pending_requests(reason="shutdown", stage="stop")
         if self.spider is not None:
             failures.extend(await self.close_spider_async(reason="shutdown"))
         await self.signals.send_catch_log_async(signal=signals.engine_stopped)
         if self._closewait:
             self._closewait.callback(None)
         return failures
+
+    async def _refund_scheduler_pending_requests(
+        self, *, reason: str, stage: str, inflight_requests: list[Request] | None = None,
+    ) -> None:
+        if self._slot is None or self.spider is None:
+            return
+
+        scheduler = self._slot.scheduler
+        scheduler_name = global_object_name(type(scheduler))
+        if self._scheduler_refund_reason is not None:
+            logger.info(
+                "Scheduler refund skipped during %(stage)s: %(scheduler)s already refunded for reason=%(reason)s",
+                {
+                    "stage": stage,
+                    "scheduler": scheduler_name,
+                    "reason": self._scheduler_refund_reason,
+                },
+                extra={"spider": self.spider},
+            )
+            return
+
+        scheduler_has_pending: bool | str = "unknown"
+        scheduler_queue_length: int | str = "unknown"
+        try:
+            scheduler_has_pending = scheduler.has_pending_requests()
+        except Exception as exc:
+            logger.info(
+                "Scheduler refund inspection during %(stage)s: has_pending_requests() failed for %(scheduler)s: %(error)s",
+                {
+                    "stage": stage,
+                    "scheduler": scheduler_name,
+                    "error": exc,
+                },
+                extra={"spider": self.spider},
+            )
+        if hasattr(scheduler, "get_queue_length") and callable(scheduler.get_queue_length):
+            try:
+                scheduler_queue_length = scheduler.get_queue_length()
+            except Exception as exc:
+                logger.info(
+                    "Scheduler refund inspection during %(stage)s: get_queue_length() failed for %(scheduler)s: %(error)s",
+                    {
+                        "stage": stage,
+                        "scheduler": scheduler_name,
+                        "error": exc,
+                    },
+                    extra={"spider": self.spider},
+                )
+        logger.info(
+            "Scheduler refund inspection: scheduler=%(scheduler)s refundable=%(refundable)s has_pending=%(has_pending)s queue_length=%(queue_length)s reason=%(reason)s stage=%(stage)s",
+            {
+                "scheduler": scheduler_name,
+                "refundable": isinstance(scheduler, RefundableScheduler),
+                "has_pending": scheduler_has_pending,
+                "queue_length": scheduler_queue_length,
+                "reason": reason,
+                "stage": stage,
+            },
+            extra={"spider": self.spider},
+        )
+
+        if not isinstance(scheduler, RefundableScheduler):
+            logger.info(
+                "Scheduler refund skipped during %(stage)s: %(scheduler)s does not implement RefundableScheduler",
+                {"stage": stage, "scheduler": scheduler_name},
+                extra={"spider": self.spider},
+            )
+            return
+
+        try:
+            logger.info(
+                "Scheduler refund starting for %(scheduler)s during %(stage)s",
+                {"scheduler": scheduler_name, "stage": stage},
+                extra={"spider": self.spider},
+            )
+            if (d := scheduler.refund_pending_requests(reason, inflight_requests=inflight_requests)) is not None:
+                await maybe_deferred_to_future(d)
+            self._scheduler_refund_reason = reason
+            logger.info(
+                "Scheduler refund finished for %(scheduler)s during %(stage)s",
+                {"scheduler": scheduler_name, "stage": stage},
+                extra={"spider": self.spider},
+            )
+        except Exception:
+            logger.error(
+                "Scheduler refund failure",
+                exc_info=True,
+                extra={"spider": self.spider},
+            )
 
     def close(self) -> Deferred[None]:
         warnings.warn(
@@ -682,6 +773,13 @@ class ExecutionEngine:
         def log_failure(msg: str) -> None:
             logger.error(msg, exc_info=True, extra={"spider": spider})  # noqa: LOG014
         failures = list[tuple[Any, Failure]]()
+
+        aborted_requests: list[Request] = []
+        try:
+            aborted_requests = self.downloader.abort()
+        except Exception:
+            log_failure("Downloader abort failure")
+
         try:
             await self._slot.close()
         except Exception:
@@ -698,60 +796,10 @@ class ExecutionEngine:
             log_failure("Scraper close failure")
 
         scheduler = self._slot.scheduler
-        scheduler_name = global_object_name(type(scheduler))
-        scheduler_has_pending: bool | str = "unknown"
-        scheduler_queue_length: int | str = "unknown"
-        try:
-            scheduler_has_pending = scheduler.has_pending_requests()
-        except Exception as exc:
-            logger.info(
-                "Scheduler refund inspection: has_pending_requests() failed for %(scheduler)s: %(error)s",
-                {"scheduler": scheduler_name, "error": exc},
-                extra={"spider": spider},
-            )
-        if hasattr(scheduler, "get_queue_length") and callable(scheduler.get_queue_length):
-            try:
-                scheduler_queue_length = scheduler.get_queue_length()
-            except Exception as exc:
-                logger.info(
-                    "Scheduler refund inspection: get_queue_length() failed for %(scheduler)s: %(error)s",
-                    {"scheduler": scheduler_name, "error": exc},
-                    extra={"spider": spider},
-                )
-        logger.info(
-            "Scheduler refund inspection: scheduler=%(scheduler)s refundable=%(refundable)s has_pending=%(has_pending)s queue_length=%(queue_length)s reason=%(reason)s",
-            {
-                "scheduler": scheduler_name,
-                "refundable": isinstance(scheduler, RefundableScheduler),
-                "has_pending": scheduler_has_pending,
-                "queue_length": scheduler_queue_length,
-                "reason": reason,
-            },
-            extra={"spider": spider},
+        await self._refund_scheduler_pending_requests(
+            reason=reason, stage="close", inflight_requests=aborted_requests
         )
-
-        if isinstance(scheduler, RefundableScheduler):
-            try:
-                logger.info(
-                    "Scheduler refund starting for %(scheduler)s",
-                    {"scheduler": scheduler_name},
-                    extra={"spider": spider},
-                )
-                if (d := scheduler.refund_pending_requests(reason)) is not None:
-                    await maybe_deferred_to_future(d)
-                logger.info(
-                    "Scheduler refund finished for %(scheduler)s",
-                    {"scheduler": scheduler_name},
-                    extra={"spider": spider},
-                )
-            except Exception:
-                log_failure("Scheduler refund failure")
-        else:
-            logger.info(
-                "Scheduler refund skipped: %(scheduler)s does not implement RefundableScheduler",
-                {"scheduler": scheduler_name},
-                extra={"spider": spider},
-            )
+        scheduler_name = global_object_name(type(scheduler))
 
         if hasattr(scheduler, "close"):
             try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from collections import deque
 from datetime import datetime
@@ -12,6 +13,7 @@ from twisted.python.failure import Failure
 from scrapy import Request, Spider, signals
 from scrapy.core.downloader.handlers import DownloadHandlers
 from scrapy.core.downloader.middleware import DownloaderMiddlewareManager
+from scrapy.exceptions import IgnoreRequest
 from scrapy.resolver import dnscache
 from scrapy.utils.asyncio import (
     AsyncioLoopingCall,
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
     from scrapy.http import Response
     from scrapy.settings import BaseSettings
     from scrapy.signalmanager import SignalManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class Slot:
@@ -130,6 +135,8 @@ class Downloader:
         self.per_slot_settings: dict[str, dict[str, Any]] = self.settings.getdict(
             "DOWNLOAD_SLOTS"
         )
+        self._shutting_down: bool = False
+        self._active_deferreds: dict[Request, Deferred[Response]] = {}
 
     @inlineCallbacks
     @_warn_spider_arg
@@ -186,6 +193,8 @@ class Downloader:
 
     # passed as download_func into self.middleware.download() in self.fetch()
     async def _enqueue_request(self, request: Request) -> Response:
+        if self._shutting_down:
+            raise IgnoreRequest("Downloader shutting down")
         key, slot = self._get_slot(request)
         request.meta[self.DOWNLOAD_SLOT] = key
         slot.active.add(request)
@@ -203,6 +212,8 @@ class Downloader:
             slot.active.remove(request)
 
     def _process_queue(self, slot: Slot) -> None:
+        if self._shutting_down:
+            return
         if slot.latercall:
             # block processing until slot.latercall is called
             return
@@ -264,12 +275,46 @@ class Downloader:
     async def _wait_for_download(
         self, slot: Slot, request: Request, queue_dfd: Deferred[Response]
     ) -> None:
+        self._active_deferreds[request] = queue_dfd
         try:
             response = await self._download(slot, request)
         except Exception:
-            queue_dfd.errback(Failure())
+            if not queue_dfd.called:
+                queue_dfd.errback(Failure())
         else:
-            queue_dfd.callback(response)  # awaited in _enqueue_request()
+            if not queue_dfd.called:
+                queue_dfd.callback(response)  # awaited in _enqueue_request()
+        finally:
+            self._active_deferreds.pop(request, None)
+
+    def abort(self) -> list[Request]:
+        """Immediately reject all queued and in-flight requests.
+
+        Sets the shutting-down flag, cancels slot timers, errbacks all pending
+        deferreds with ``IgnoreRequest``, and returns the list of aborted
+        ``Request`` objects so the caller can refund them.
+        """
+        self._shutting_down = True
+        aborted: list[Request] = []
+        ignore = Failure(IgnoreRequest("Downloader aborted"))
+        for slot in self.slots.values():
+            slot.close()  # cancel latercall
+            # Drain the queue
+            while slot.queue:
+                request, queue_dfd = slot.queue.popleft()
+                aborted.append(request)
+                if not queue_dfd.called:
+                    queue_dfd.errback(ignore)
+        # Errback all in-flight (transferring) deferreds
+        for request, queue_dfd in list(self._active_deferreds.items()):
+            aborted.append(request)
+            if not queue_dfd.called:
+                queue_dfd.errback(ignore)
+        logger.info(
+            "Downloader aborted: %(count)d requests rejected",
+            {"count": len(aborted)},
+        )
+        return aborted
 
     def close(self) -> None:
         self._stop_slot_gc()
