@@ -234,7 +234,6 @@ class ExecutionEngine:
                 self._start_request_processing_awaitable.cancel()
             self._start_request_processing_awaitable = None
         failures = list[tuple[Any, Failure]]()
-        await self._refund_scheduler_pending_requests(reason="shutdown", stage="stop")
         if self.spider is not None:
             failures.extend(await self.close_spider_async(reason="shutdown"))
         await self.signals.send_catch_log_async(signal=signals.engine_stopped)

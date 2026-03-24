@@ -61,12 +61,35 @@ class CloseSpider:
         self.counter: defaultdict[str, int] = defaultdict(int)
 
         if self.close_on.get("errorcount"):
+            logger.info(
+                "Spider will close after %d errors.",
+                self.close_on["errorcount"],
+            )
             crawler.signals.connect(self.error_count, signal=signals.spider_error)
         if self.close_on.get("pagecount") or self.close_on.get("pagecount_no_item"):
+            if self.close_on.get("pagecount"):
+                logger.info(
+                    "Spider will close after %d pages.",
+                    self.close_on["pagecount"],
+                )
+            if self.close_on.get("pagecount_no_item"):
+                logger.info(
+                    "Spider will close after %d consecutive pages with no items.",
+                    self.close_on["pagecount_no_item"],
+                )
             crawler.signals.connect(self.page_count, signal=signals.response_received)
         if self.close_on.get("timeout"):
+            logger.info(
+                "Spider will close after %.1f seconds.",
+                self.close_on["timeout"],
+            )
             crawler.signals.connect(self.spider_opened, signal=signals.spider_opened)
         if self.close_on.get("itemcount") or self.close_on.get("pagecount_no_item"):
+            if self.close_on.get("itemcount"):
+                logger.info(
+                    "Spider will close after %d items scraped.",
+                    self.close_on["itemcount"],
+                )
             crawler.signals.connect(self.item_scraped, signal=signals.item_scraped)
         if self.close_on.get("timeout_no_item"):
             self.timeout_no_item: int = self.close_on["timeout_no_item"]
